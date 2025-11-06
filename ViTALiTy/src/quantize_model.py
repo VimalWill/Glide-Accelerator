@@ -13,14 +13,18 @@ python3 ViTALiTy/src/quantize_model.py \
 
 import os
 import argparse
+import numpy as np
 from pathlib import Path
 from timm import create_model
 import torch
 import torch.nn as nn
 import models
-
 from datasets import build_dataset
+
+import onnx
 from onnxruntime.quantization import quantize_static, CalibrationDataReader, QuantType, QuantFormat
+from onnxruntime.quantization.shape_inference import quant_pre_process
+from onnx.utils import extract_model
 import onnxruntime as ort
 
 
@@ -96,15 +100,85 @@ class _ExportLogitsOnly(nn.Module):
         return out
 
 
+def collect_linear_tensors(subgraph_path, float_model=True):
+    model = onnx.load(subgraph_path)
+    names = set()
+    if float_model:
+        target_ops = {"MatMul", "Gemm"}
+    else:
+        target_ops = {"QLinearMatMul"}
+
+    for node in model.graph.node:
+        if node.op_type not in target_ops:
+            continue
+        names.add(node.input[0])
+        names.add(node.output[0])
+
+    return sorted(names)
+
+
+def add_interm_outputs(full_model_path, tensor_names, out_path):
+    model = onnx.load(full_model_path)
+    model = onnx.shape_inference.infer_shapes(model)
+
+    existing_outputs = {o.name for o in model.graph.output}
+
+    value_info_map = {}
+    for vi in list(model.graph.value_info) + list(model.graph.input) + list(model.graph.output):
+        value_info_map[vi.name] = vi
+
+    for name in tensor_names:
+        if name in existing_outputs:
+            continue
+        vi = value_info_map.get(name)
+        if vi is not None:
+            model.graph.output.append(vi)
+        else:
+            model.graph.output.append(
+                onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, None)
+            )
+
+    onnx.save(model, out_path)
+
+
+def save_interm_outputs(
+    model_path,
+    dataloader,
+    input_name,
+    tensor_names,
+    npz_path,
+    max_batches=None,
+):
+    sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    ort_outputs = sess.get_outputs()
+    output_name_to_idx = {o.name: i for i, o in enumerate(ort_outputs)}
+    buffers = {name: [] for name in tensor_names}
+
+    for bidx, (images, *rest) in enumerate(dataloader):
+        if max_batches is not None and bidx >= max_batches:
+            break
+        x = images.cpu().numpy()
+        outputs = sess.run(None, {input_name: x})
+
+        for name in tensor_names:
+            idx = output_name_to_idx.get(name, None)
+            if idx is None:
+                raise RuntimeError(f"Tensor {name} not found in ORT outputs of {model_path}")
+            buffers[name].append(outputs[idx])
+
+    arrays = {name: np.concatenate(chunks, axis=0) for name, chunks in buffers.items()}
+    np.savez(npz_path, **arrays)
+
+
 def quantize_model(model: nn.Module, args: argparse.Namespace, val_loader) -> str:
     # Export the float model to ONNX
     dummy = torch.randn(1, 3, args.img_size, args.img_size, device=args.device)
-    onnx_path = os.path.join(args.out, "model_float.onnx")
+    float_onnx_path = os.path.join(args.out, "model_float.onnx")
     export_model = _ExportLogitsOnly(model).eval().to(args.device)
     torch.onnx.export(
         export_model, 
         dummy, 
-        onnx_path,
+        float_onnx_path,
         input_names=["input"], 
         output_names=["logits"],
         opset_version=17, 
@@ -115,8 +189,8 @@ def quantize_model(model: nn.Module, args: argparse.Namespace, val_loader) -> st
         },
     )
 
-    num_calib = args.num_calib
-    calib_subset  = torch.utils.data.Subset(val_loader, list(range(num_calib)))
+    # Prepare calibration data
+    calib_subset  = torch.utils.data.Subset(val_loader, list(range(args.num_calib)))
     calib_loader  = torch.utils.data.DataLoader(
         calib_subset,
         batch_size=args.batch_size, 
@@ -126,9 +200,37 @@ def quantize_model(model: nn.Module, args: argparse.Namespace, val_loader) -> st
         drop_last=False
     )
     calib_data = DataReader(calib_loader, max_samples=args.num_calib, input_name="input")
+
+    # Preprocess
+    print("Quantization preprocessing...")
+    pre_onnx_path = os.path.join(args.out, "model_preprocessed.onnx")
+    quant_pre_process(
+        float_onnx_path,
+        pre_onnx_path,
+        skip_symbolic_shape=True,
+        skip_optimization=True,
+    )
+
+    # Extract float attention subgraph
+    extracted_float_path = os.path.join(args.out, "extracted_attn_float.onnx")
+    extract_model(
+        pre_onnx_path,
+        extracted_float_path,
+        input_names=["/model/Add_output_0"],
+        output_names=["/model/blocks/blocks.0/Add_output_0"],
+    )
+    float_linear_tensors = collect_linear_tensors(
+        extracted_float_path, 
+        float_model=True
+    )
+    float_onnx_path_detailed = os.path.join(args.out, "float_detailed.onnx")
+    add_interm_outputs(pre_onnx_path, float_linear_tensors, float_onnx_path_detailed)
+
+    # Quantization
+    print("Quantizing...")
     quant_onnx_path = os.path.join(args.out, "model_quantized.onnx")
     quantize_static(
-        model_input=onnx_path,
+        model_input=pre_onnx_path,
         model_output=quant_onnx_path,
         calibration_data_reader=calib_data,
         per_channel=True,
@@ -139,6 +241,42 @@ def quantize_model(model: nn.Module, args: argparse.Namespace, val_loader) -> st
         extra_options={"ActivationSymmetric": False},
         quant_format=QuantFormat.QOperator
     )
+
+    # Extract quantized attention subgraph
+    extracted_quant_path = os.path.join(args.out, "extracted_attn_quant.onnx")
+    extract_model(
+        quant_onnx_path,
+        extracted_quant_path,
+        input_names=["/model/Add_output_0"],
+        output_names=["/model/blocks/blocks.0/Add_output_0"],
+    )
+    quant_linear_tensors = collect_linear_tensors(
+        extracted_quant_path, 
+        float_model=False
+    )
+    quant_onnx_path_detailed = os.path.join(args.out, "quant_detailed.onnx")
+    add_interm_outputs(quant_onnx_path, quant_linear_tensors, quant_onnx_path_detailed)
+
+    # Inference and save intermediate data
+    print("Collecting intermediate data...")
+    float_npz_path = os.path.join(args.out, "attn_float_activations.npz")
+    save_interm_outputs(
+        float_onnx_path_detailed,
+        calib_loader,
+        input_name="input",
+        tensor_names=float_linear_tensors,
+        npz_path=float_npz_path,
+    )
+
+    quant_npz_path = os.path.join(args.out, "attn_quant_activations.npz")
+    save_interm_outputs(
+        quant_onnx_path_detailed,
+        calib_loader,
+        input_name="input",
+        tensor_names=quant_linear_tensors,
+        npz_path=quant_npz_path,
+    )
+
     return quant_onnx_path
 
 
@@ -159,7 +297,7 @@ def evaluate_onnx(onnx_path: str,
 
     in_name  = sess.get_inputs()[0].name
     out_name = sess.get_outputs()[0].name
-
+    print("Evaluating ONNX model...")
     correct = 0
     total = 0
     with torch.no_grad():
@@ -223,7 +361,7 @@ def main(args):
     model.eval()
 
     quant_model_path = quantize_model(model, args, dataset_val)
-    evaluate_onnx(quant_model_path, dataset_val, args)
+    # evaluate_onnx(quant_model_path, dataset_val, args)
 
 
 if __name__ == '__main__':
