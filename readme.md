@@ -1,42 +1,48 @@
-# Energy-Efficient Accelerator Architecture for Transformers Using Linear Attention
+# Glide Accelerator
 
-This is the repo for ECE562 project **Energy-Efficient Accelerator Architecture for Transformers Using Linear Attention**.
+Low-power hardware accelerator for efficient Vision Transformer inference using linear attention approximation and systolic array architecture.
 
-## Structure
+## Architecture
 
-```
-    /models
-        /degree_x_train
-            models after training
-            /checkpoint.pth
-                models after training
-            /model_float.onnx
-                float ONNX model
-            /model_quantized.onnx
-                ONNX model with linear and matmul nodes quantized
-            /log
-                training log file
-        /degree_x_quant
-            models and datafiles after quantization and processing
-            /attn_float_activations.npz
-                datafile, includes the input and output of linear/matmul nodes on calibration datasets on **extracted_attn_float**
-            /attn_quant_activations.npz
-                datafile, includes the input and output of linear/matmul nodes on calibration datasets on **extracted_attn_quant**
-            /extracted_attn_float.onnx
-                subgraph of **model_float.onnx**, only contains the attention part of the 1st block
-            /extracted_attn_quant.onnx
-                subgraph of **model_quantized.onnx**, only contains the attention part of the 1st block
-            
-    /ViTALiTy
-        modified code, support degree-1 and degree-2 taylor expression of attention
+- **Systolic Array**: 32×16 processing elements (512 MACs)
+- **Precision**: INT8 quantization with 32-bit accumulation
+- **Attention Mechanism**: Taylor-series approximated softmax (degree-1 & degree-2)
+- **Throughput**: 512 MACs/cycle @ 200 MHz
+- **Resource Efficiency**: Shared quantization units (64 units time-multiplexed)
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| Target Frequency | 200 MHz |
+| Peak Throughput | 102.4 GOPS |
+| LUT Utilization | ~36% |
+| DSP Utilization | ~15% |
+| Latency (End-to-End) | ~61 cycles |
+
+## Quick Start
+
+### Simulation
+```bash
+cd hw
+source /tools/Xilinx/Vivado/<version>/settings64.sh
+./run_vivado.sh sim
 ```
 
-You can use netron to visualize the extracted_attn_xxx.onnx files to see the relationship of data and model connections.
+### Synthesis
+```bash
+cd hw
+./run_vivado.sh synth
+```
 
-## Acknowledge
+## Documentation
 
-The code refers to:
+- [Hardware Architecture](hw/README.md) - Detailed RTL documentation
+- [Production Release Notes](PRODUCTION_RELEASE_NOTES.md) - Verification and validation
+- [Implementation Guide](hw/IMPLEMENTATION_GUIDE.md) - Integration instructions
 
-https://github.com/GATECH-EIC/ViTALiTy
+## References
 
-https://github.com/AMD-AGI/AMD_QTViT
+- [ViTALiTy](https://github.com/GATECH-EIC/ViTALiTy) - Vision Transformer acceleration
+- [AMD QTViT](https://github.com/AMD-AGI/AMD_QTViT) - Quantization techniques
+
