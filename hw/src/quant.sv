@@ -76,18 +76,31 @@ module requant(
         end
     end
 
-    // Stage 4: Saturation with optimized comparison
-    // Check if any upper bits are set for overflow detection
+    // Stage 4: Saturation with signed overflow detection
+    // Proper signed saturation for 8-bit output
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
             clamped <= '0;
         end else begin
             if (en_s3) begin
-                // Optimized saturation: check upper bits for overflow
-                if (|shifted[31:8])  // Any bit set in upper 24 bits = overflow
-                    clamped <= 8'hFF;  // Saturate to max
-                else
-                    clamped <= shifted[7:0];
+                // Signed saturation logic
+                if (shifted[31]) begin
+                    // Negative value
+                    if (~(&shifted[31:7])) begin
+                        // Negative overflow - not all sign bits are 1
+                        clamped <= 8'h80;  // Most negative: -128
+                    end else begin
+                        clamped <= shifted[7:0];
+                    end
+                end else begin
+                    // Positive value
+                    if (|shifted[31:7]) begin
+                        // Positive overflow - any upper bit set
+                        clamped <= 8'h7F;  // Most positive: +127
+                    end else begin
+                        clamped <= shifted[7:0];
+                    end
+                end
             end
         end
     end

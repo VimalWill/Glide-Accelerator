@@ -1,13 +1,13 @@
 module quant_top (
-    input  logic        clk,
-    input  logic        rst,
-    input  logic        en,
+    input  logic clk,
+    input  logic rst,
+    input  logic en,
 
     input  logic [31:0] data_in,
     input  logic [31:0] scale_factor,
-    input  logic [7:0]  shift_amount,
+    input  logic [7:0] shift_amount,
 
-    output logic [7:0]  data_out
+    output logic [7:0] data_out
 );
 
     // Instantiate the requantization module
