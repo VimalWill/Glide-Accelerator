@@ -149,6 +149,78 @@ run_implementation_gui() {
     cd "$HW_DIR" || exit 1
 }
 
+# Package IP
+package_ip() {
+    print_header "Packaging IP"
+
+    cd "$SCRIPTS_DIR" || exit 1
+
+    echo -e "${YELLOW}Creating Vivado IP package...${NC}"
+    vivado -mode batch -source create_ip.tcl -log ../vivado_ip.log -journal ../vivado_ip.jou
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ IP packaging completed successfully${NC}"
+        echo -e "  Log file: vivado_ip.log"
+        echo -e "  IP location: ip_repo/"
+        echo ""
+        echo -e "${BLUE}To use this IP:${NC}"
+        echo -e "  1. Open Vivado project"
+        echo -e "  2. Settings -> IP -> Repository"
+        echo -e "  3. Add: $HW_DIR/ip_repo"
+        echo -e "  4. Find 'Systolic Array Accelerator' in IP Catalog"
+    else
+        echo -e "${RED}✗ IP packaging failed${NC}"
+        echo -e "  Check vivado_ip.log for details"
+        exit 1
+    fi
+
+    cd "$HW_DIR" || exit 1
+}
+
+# Create block design
+create_block_design() {
+    print_header "Creating Block Design (PS + PL)"
+
+    cd "$SCRIPTS_DIR" || exit 1
+
+    echo -e "${YELLOW}Creating Zynq UltraScale+ block design...${NC}"
+    echo -e "  This will create a complete PS-PL system"
+    vivado -mode batch -source create_bd.tcl -log ../vivado_bd.log -journal ../vivado_bd.jou
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ Block design created successfully${NC}"
+        echo -e "  Log file: vivado_bd.log"
+        echo ""
+        echo -e "${BLUE}Memory Map:${NC}"
+        echo -e "  Systolic Accelerator: 0xA000_0000"
+        echo -e "  DMA Input:            0xA001_0000"
+        echo -e "  DMA Output:           0xA002_0000"
+        echo -e "  Interrupt Controller: 0xA003_0000"
+    else
+        echo -e "${RED}✗ Block design creation failed${NC}"
+        echo -e "  Check vivado_bd.log for details"
+        exit 1
+    fi
+
+    cd "$HW_DIR" || exit 1
+}
+
+# Create block design in GUI
+create_block_design_gui() {
+    print_header "Creating Block Design (PS + PL) in GUI"
+
+    cd "$SCRIPTS_DIR" || exit 1
+
+    echo -e "${YELLOW}Opening Vivado GUI with block design...${NC}"
+    echo -e "  You will be able to see and modify the design"
+    vivado -mode gui -source create_bd_gui.tcl &
+
+    echo -e "${GREEN}Vivado GUI launched${NC}"
+    echo -e "  The block design will be created and opened automatically"
+
+    cd "$HW_DIR" || exit 1
+}
+
 # Clean generated files
 clean_project() {
     print_header "Cleaning Vivado Projects"
@@ -168,6 +240,13 @@ clean_project() {
     # Implementation files
     rm -f "$HW_DIR/vivado_impl.log"
     rm -f "$HW_DIR/vivado_impl.jou"
+
+    # IP and BD files
+    rm -rf "$HW_DIR/ip_repo"
+    rm -f "$HW_DIR/vivado_ip.log"
+    rm -f "$HW_DIR/vivado_ip.jou"
+    rm -f "$HW_DIR/vivado_bd.log"
+    rm -f "$HW_DIR/vivado_bd.jou"
 
     # Other Vivado files
     rm -rf "$HW_DIR/.Xil"
@@ -191,6 +270,9 @@ show_usage() {
     echo "  impl-gui    Run implementation in GUI mode"
     echo "  both        Run simulation and synthesis (batch)"
     echo "  full        Run simulation, synthesis, and implementation (batch)"
+    echo "  package-ip  Package design as Vivado IP"
+    echo "  create-bd   Create block design with PS + PL integration (batch)"
+    echo "  create-bd-gui Create block design and open in GUI"
     echo "  clean       Remove all generated files"
     echo "  help        Show this help message"
     echo ""
@@ -200,6 +282,9 @@ show_usage() {
     echo "  $0 synth            # Run synthesis"
     echo "  $0 impl             # Run implementation (requires synthesis first)"
     echo "  $0 full             # Run complete flow: sim -> synth -> impl"
+    echo "  $0 package-ip       # Package as IP for reuse"
+    echo "  $0 create-bd        # Create Zynq block design"
+    echo "  $0 create-bd-gui    # Create block design in GUI (visual)"
     echo "  $0 clean            # Clean all generated files"
     echo ""
 }
@@ -236,6 +321,15 @@ main() {
             run_synthesis
             echo ""
             run_implementation
+            ;;
+        package-ip)
+            package_ip
+            ;;
+        create-bd)
+            create_block_design
+            ;;
+        create-bd-gui)
+            create_block_design_gui
             ;;
         clean)
             clean_project
